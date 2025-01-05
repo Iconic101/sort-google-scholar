@@ -198,27 +198,28 @@ def get_content_with_selenium(url):
 
     return c.encode('utf-8')
 def get_download_link(div):
-    """Extract download link from the div, if available."""
+
     try:
         download_link = div.find("div", {"class": "gs_ggs gs_fl"}).find("a").get("href")
         if "pdf" in download_link.lower():
             return download_link
-    except AttributeError:
+    except Exception:
         pass
     return None
-def download_pdf(url, save_path):
-    """Download the PDF from the given URL."""
+def download_pdf(url,path):
+
     try:
         response = requests.get(url, stream=True)
         if response.headers.get("content-type") == "application/pdf":
-            with open(save_path, "wb") as file:
+            with open(path, "wb") as file:
                 for chunk in response.iter_content(chunk_size=1024):
                     file.write(chunk)
-            print(f"Downloaded: {save_path}")
+            print(f"Downloaded: {path}")
         else:
             print(f"Skipping non-PDF content: {url}")
     except Exception as e:
         print(f"Failed to download PDF from {url}. Error: {e}")
+        
 def format_strings(strings):
     if len(strings) == 1:
         return f'lang_{strings[0]}'
@@ -265,21 +266,21 @@ def main():
                 download_link = div.find("div", {"class": "gs_ggs gs_fl"}).find("a").get("href")
                 if "pdf" in download_link.lower():
                     return download_link
-            except AttributeError:
+            except Exception:
                 pass
             return None
 
         # Function to download PDF
-        def download_pdf(url, save_path):
+        def download_pdf(url,path):
             try:
                 response = requests.get(url, stream=True)
                 if response.headers.get("content-type") == "application/pdf":
-                    with open(save_path, "wb") as file:
+                    with open(path, "wb") as file:
                         for chunk in response.iter_content(chunk_size=1024):
                             file.write(chunk)
-                    print(f"Downloaded: {save_path}")
+                    print(f"Downloaded: {path}")
                 else:
-                    print(f"Skipping non-PDF content: {url}")
+                    print(f"No download link: {url}")
             except Exception as e:
                 print(f"Failed to download PDF from {url}. Error: {e}")
 
@@ -381,7 +382,7 @@ def main():
         print(data_ranked)
 
         # Plot by citation number
-        if True:
+        if plot_results:
             plt.plot(rank[1:], citations, '*')
             plt.ylabel('Number of Citations')
             plt.xlabel('Rank of the keyword on Google Scholar')
@@ -389,7 +390,7 @@ def main():
             plt.show()
 
         # Save results
-        if False:
+        if save_database:
             fpath_csv = os.path.join(path, keyword.replace(' ', '_').replace(':', '_') + '.csv')
             fpath_csv = fpath_csv[:MAX_CSV_FNAME]
             data_ranked.to_csv(fpath_csv, encoding='utf-8')
