@@ -39,7 +39,7 @@ if sys.version[0]=="3": raw_input=input
 
 # Default Parameters
 KEYWORD = 'machine learning' # Default argument if command line is empty
-NRESULTS = 100 # Fetch 100 articles
+NRESULTS = 40# Fetch 100 articles
 CSVPATH = os.getcwd() # Current folder as default path
 SAVECSV = True
 SORTBY = 'Citations'
@@ -106,7 +106,7 @@ def get_command_line_args():
     sortby = SORTBY
     if args.sortby:
         sortby=args.sortby
-    
+
     langfilter = LANG
     if args.langfilter:
         langfilter = args.langfilter
@@ -122,7 +122,7 @@ def get_command_line_args():
     end_year = ENDYEAR
     if args.endyear:
         end_year=args.endyear
-    
+
     debug = DEBUG
     if args.debug:
         debug = True
@@ -201,13 +201,15 @@ def get_download_link(div):
 
     try:
         download_link = div.find("div", {"class": "gs_ggs gs_fl"}).find("a").get("href")
+
         if "pdf" in download_link.lower():
             return download_link
     except Exception:
         pass
     return None
-def download_pdf(url,path):
 
+
+def download_pdf(url, path):
     try:
         response = requests.get(url, stream=True)
         if response.headers.get("content-type") == "application/pdf":
@@ -215,189 +217,203 @@ def download_pdf(url,path):
                 for chunk in response.iter_content(chunk_size=1024):
                     file.write(chunk)
             print(f"Downloaded: {path}")
+            return True
         else:
             print(f"Skipping non-PDF content: {url}")
+            return False
     except Exception as e:
         print(f"Failed to download PDF from {url}. Error: {e}")
-        
+        return False
+
 def format_strings(strings):
     if len(strings) == 1:
         return f'lang_{strings[0]}'
     else:
         return '%7C'.join(f'lang_{s}' for s in strings)
 
+
 def main():
-    def main():
-        # Get command line arguments
-        keyword, number_of_results, save_database, path, sortby_column, langfilter, plot_results, start_year, end_year, debug = get_command_line_args()
+    # Get command line arguments
+    keyword, number_of_results, save_database, path, sortby_column, langfilter, plot_results, start_year, end_year, debug = get_command_line_args()
 
-        print("Running with the following parameters:")
-        print(
-            f"Keyword: {keyword}, Number of results: {number_of_results}, Save database: {save_database}, Path: {path}, Sort by: {sortby_column}, Permitted Languages: {langfilter}, Plot results: {plot_results}, Start year: {start_year}, End year: {end_year}, Debug: {debug}")
+    print("Running with the following parameters:")
+    print(
+        f"Keyword: {keyword}, Number of results: {number_of_results}, Save database: {save_database}, Path: {path}, Sort by: {sortby_column}, Permitted Languages: {langfilter}, Plot results: {plot_results}, Start year: {start_year}, End year: {end_year}, Debug: {debug}")
 
-        # Create main URL based on command line arguments
-        if start_year:
-            GSCHOLAR_MAIN_URL = GSCHOLAR_URL + STARTYEAR_URL.format(start_year)
-        else:
-            GSCHOLAR_MAIN_URL = GSCHOLAR_URL
+    temp_csv = "temp_results.csv"  # Temporary file for saving progress
+    processed_ranks = []  # Track already processed ranks
 
-        if end_year != now.year:
-            GSCHOLAR_MAIN_URL = GSCHOLAR_MAIN_URL + ENDYEAR_URL.format(end_year)
+    # Check for resumption
+    if os.path.exists(temp_csv):
+        print(f"Found temporary file: {temp_csv}. Resuming from saved progress.")
+        data = pd.read_csv(temp_csv, index_col="Rank")
+        processed_ranks = data.index.tolist()
+    else:
+        data = pd.DataFrame(columns=['ID', 'Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source', 'Download Link', 'Download Status'])
 
-        if langfilter != 'All':
-            formatted_filters = format_strings(langfilter)
-            GSCHOLAR_MAIN_URL = GSCHOLAR_MAIN_URL + LANG_URL.format(formatted_filters)
+    # Create main URL based on command line arguments
+    if start_year:
+        GSCHOLAR_MAIN_URL = GSCHOLAR_URL + STARTYEAR_URL.format(start_year)
+    else:
+        GSCHOLAR_MAIN_URL = GSCHOLAR_URL
 
+    if end_year != now.year:
+        GSCHOLAR_MAIN_URL = GSCHOLAR_MAIN_URL + ENDYEAR_URL.format(end_year)
+
+    if langfilter != 'All':
+        formatted_filters = format_strings(langfilter)
+        GSCHOLAR_MAIN_URL = GSCHOLAR_MAIN_URL + LANG_URL.format(formatted_filters)
+
+    if debug:
+        GSCHOLAR_MAIN_URL = 'https://web.archive.org/web/20210314203256/' + GSCHOLAR_URL
+
+    # Start new session
+    session = requests.Session()
+
+    # Variables
+    links, title, citations, year, author, venue, publisher, rank, download_links, download_status, paper_ids = ([] for _ in range(11))
+    rank = [0]  # Start rank at 0
+    pdf_save_dir = os.path.join(path, "PDFs")  # Directory for saving PDFs
+    os.makedirs(pdf_save_dir, exist_ok=True)
+
+    # Generates unique IDs for naming the downloaded pdfs
+    def generate_unique_id(idx):
+        return f"paper_{idx:04d}"
+
+    # Function to download PDF
+
+
+    # Get content from number_of_results URLs
+    for n in range(0, number_of_results, 10):
+        if n in processed_ranks:
+            print(f"Skipping results already processed in temp csv file.")
+            continue
+
+        url = GSCHOLAR_MAIN_URL.format(str(n), keyword.replace(' ', '+'))
         if debug:
-            GSCHOLAR_MAIN_URL = 'https://web.archive.org/web/20210314203256/' + GSCHOLAR_URL
+            print("Opening URL:", url)
 
-        # Start new session
-        session = requests.Session()
-
-        # Variables
-        links, title, citations, year, author, venue, publisher, rank, download_links = ([] for _ in range(9))
-        rank = [0]  # Start rank at 0
-        pdf_save_dir = os.path.join(path, "PDFs")  # Directory for saving PDFs
-        os.makedirs(pdf_save_dir, exist_ok=True)
-
-        # Function to extract download links
-        def get_download_link(div):
+        print(f"Loading next {n + 10} results")
+        page = session.get(url)
+        c = page.content
+        if any(kw in c.decode('ISO-8859-1') for kw in ROBOT_KW):
+            print("Robot checking detected, handling with selenium (if installed)")
             try:
-                download_link = div.find("div", {"class": "gs_ggs gs_fl"}).find("a").get("href")
-                if "pdf" in download_link.lower():
-                    return download_link
-            except Exception:
-                pass
-            return None
-
-        # Function to download PDF
-        def download_pdf(url,path):
-            try:
-                response = requests.get(url, stream=True)
-                if response.headers.get("content-type") == "application/pdf":
-                    with open(path, "wb") as file:
-                        for chunk in response.iter_content(chunk_size=1024):
-                            file.write(chunk)
-                    print(f"Downloaded: {path}")
-                else:
-                    print(f"No download link: {url}")
+                c = get_content_with_selenium(url)
             except Exception as e:
-                print(f"Failed to download PDF from {url}. Error: {e}")
+                print("No success. The following error was raised:")
+                print(e)
 
-        # Get content from number_of_results URLs
-        for n in range(0, number_of_results, 10):
-            url = GSCHOLAR_MAIN_URL.format(str(n), keyword.replace(' ', '+'))
-            if debug:
-                print("Opening URL:", url)
+        # Create parser
+        soup = BeautifulSoup(c, 'html.parser', from_encoding='utf-8')
 
-            print(f"Loading next {n + 10} results")
-            page = session.get(url)
-            c = page.content
-            if any(kw in c.decode('ISO-8859-1') for kw in ROBOT_KW):
-                print("Robot checking detected, handling with selenium (if installed)")
-                try:
-                    c = get_content_with_selenium(url)
-                except Exception as e:
-                    print("No success. The following error was raised:")
-                    print(e)
+        # Get stuff
+        mydivs = soup.findAll("div", {"class": "gs_or"})
+        for div in mydivs:
+            paper_id = generate_unique_id(len(rank))
+            paper_ids.append(paper_id)
 
-            # Create parser
-            soup = BeautifulSoup(c, 'html.parser', from_encoding='utf-8')
+            try:
+                links.append(div.find('h3').find('a').get('href'))
+            except:
+                links.append(f'Look manually at: {url}')
 
-            # Get stuff
-            mydivs = soup.findAll("div", {"class": "gs_or"})
-            for div in mydivs:
-                try:
-                    links.append(div.find('h3').find('a').get('href'))
-                except:
-                    links.append(f'Look manually at: {url}')
+            try:
+                title.append(div.find('h3').find('a').text)
+            except:
+                title.append('Could not catch title')
 
-                try:
-                    title.append(div.find('h3').find('a').text)
-                except:
-                    title.append('Could not catch title')
+            try:
+                citations.append(get_citations(str(div.format_string)))
+            except:
+                warnings.warn(f"Number of citations not found for {title[-1]}. Appending 0")
+                citations.append(0)
 
-                try:
-                    citations.append(get_citations(str(div.format_string)))
-                except:
-                    warnings.warn(f"Number of citations not found for {title[-1]}. Appending 0")
-                    citations.append(0)
+            try:
+                year.append(get_year(div.find('div', {'class': 'gs_a'}).text))
+            except:
+                warnings.warn(f"Year not found for {title[-1]}, appending 0")
+                year.append(0)
 
-                try:
-                    year.append(get_year(div.find('div', {'class': 'gs_a'}).text))
-                except:
-                    warnings.warn(f"Year not found for {title[-1]}, appending 0")
-                    year.append(0)
+            try:
+                author.append(get_author(div.find('div', {'class': 'gs_a'}).text))
+            except:
+                author.append("Author not found")
 
-                try:
-                    author.append(get_author(div.find('div', {'class': 'gs_a'}).text))
-                except:
-                    author.append("Author not found")
+            try:
+                publisher.append(div.find('div', {'class': 'gs_a'}).text.split("-")[-1])
+            except:
+                publisher.append("Publisher not found")
 
-                try:
-                    publisher.append(div.find('div', {'class': 'gs_a'}).text.split("-")[-1])
-                except:
-                    publisher.append("Publisher not found")
+            try:
+                venue.append(" ".join(div.find('div', {'class': 'gs_a'}).text.split("-")[-2].split(",")[:-1]))
+            except:
+                venue.append("Venue not found")
 
-                try:
-                    venue.append(" ".join(div.find('div', {'class': 'gs_a'}).text.split("-")[-2].split(",")[:-1]))
-                except:
-                    venue.append("Venue not found")
+            # Extract and store download link
+            download_link = get_download_link(div)
+            download_links.append(download_link)
 
-                # Extract and store download link
-                download_link = get_download_link(div)
-                download_links.append(download_link)
+            # Download PDF if download link is available
+            if download_link:
+                pdf_save_path = os.path.join(pdf_save_dir, f"{paper_id}.pdf")
+                success = download_pdf(download_link, pdf_save_path)
+                download_status.append("Success" if success else "Failed")
+            else:
+                download_status.append("No Link")
 
-                # Download PDF if download link is available
-                if download_link:
-                    pdf_filename = f"{rank[-1]}_{re.sub(r'[^\w]', '_', title[-1])[:50]}.pdf"
-                    pdf_save_path = os.path.join(pdf_save_dir, pdf_filename)
-                    download_pdf(download_link, pdf_save_path)
+            rank.append(rank[-1] + 1)
 
-                rank.append(rank[-1] + 1)
+        # Save progress to temporary file
+        temp_data = pd.DataFrame(list(zip(paper_ids, author, title, citations, year, publisher, venue, links, download_links, download_status)),
+                                 index=rank[1:],
+                                 columns=['ID', 'Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source', 'Download Link', 'Download Status'])
+        temp_data.index.name = 'Rank'
+        data = pd.concat([data, temp_data])
+        data.to_csv(temp_csv, encoding='utf-8')
+        print(f"Progress saved to {temp_csv}")
 
-            # Delay
-            sleep(random.uniform(0.5, 3))
+        # Delay
+        sleep(random.uniform(0.5, 3))
 
-        # Create a dataset and sort by the number of citations
-        data = pd.DataFrame(list(zip(author, title, citations, year, publisher, venue, links, download_links)),
-                            index=rank[1:],
-                            columns=['Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source',
-                                     'Download Link'])
-        data.index.name = 'Rank'
+    # Create a dataset and sort by the number of citations
+    data['cit/year'] = data['Citations'] / (end_year + 1 - data['Year'].clip(upper=end_year))
+    data['cit/year'] = data['cit/year'].round(0).astype(int)
 
-        # Avoid years that are higher than the current year by clipping it to end_year
-        data['cit/year'] = data['Citations'] / (end_year + 1 - data['Year'].clip(upper=end_year))
-        data['cit/year'] = data['cit/year'].round(0).astype(int)
+    # Sort by the selected columns, if exists
+    try:
+        data_ranked = data.sort_values(by=sortby_column, ascending=False)
+    except Exception as e:
+        print('Column name to be sorted not found. Sorting by the number of citations...')
+        data_ranked = data.sort_values(by='Citations', ascending=False)
+        print(e)
 
-        # Sort by the selected columns, if exists
-        try:
-            data_ranked = data.sort_values(by=sortby_column, ascending=False)
-        except Exception as e:
-            print('Column name to be sorted not found. Sorting by the number of citations...')
-            data_ranked = data.sort_values(by='Citations', ascending=False)
-            print(e)
+    # Print data
+    print(data_ranked)
 
-        # Print data
-        print(data_ranked)
+    # Plot by citation number
+    if plot_results:
+        plt.plot(rank[1:], citations, '*')
+        plt.ylabel('Number of Citations')
+        plt.xlabel('Rank of the keyword on Google Scholar')
+        plt.title(f'Keyword: {keyword}')
+        plt.show()
 
-        # Plot by citation number
-        if plot_results:
-            plt.plot(rank[1:], citations, '*')
-            plt.ylabel('Number of Citations')
-            plt.xlabel('Rank of the keyword on Google Scholar')
-            plt.title(f'Keyword: {keyword}')
-            plt.show()
+    # Save results
+    if save_database:
+        fpath_csv = os.path.join(path, keyword.replace(' ', '_').replace(':', '_') + '.csv')
+        fpath_csv = fpath_csv[:MAX_CSV_FNAME]
+        data_ranked.to_csv(fpath_csv, encoding='utf-8')
+        print('Results saved to', fpath_csv)
 
-        # Save results
-        if save_database:
-            fpath_csv = os.path.join(path, keyword.replace(' ', '_').replace(':', '_') + '.csv')
-            fpath_csv = fpath_csv[:MAX_CSV_FNAME]
-            data_ranked.to_csv(fpath_csv, encoding='utf-8')
-            print('Results saved to', fpath_csv)
+    #delete the temporary file
+    if os.path.exists(temp_csv):
+        os.remove(temp_csv)
+       
 
-    if __name__ == '__main__':
-        main()
+
+
+
 
 
 if __name__ == '__main__':
