@@ -15,11 +15,16 @@ a .csv file.
 
 
 """
-
+from urllib.parse import urljoin
+import requests
+import bs4
 import requests, os, datetime, argparse
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 import pandas as pd
+import aiohttp
+import asyncio
+from aiofiles import open as aio_open
 from time import sleep
 import warnings
 import random
@@ -50,6 +55,8 @@ ENDYEAR = now.year # Current year
 DEBUG=False # debug mode
 MAX_CSV_FNAME = 255
 LANG = 'All'
+MAX_RETRIES = 4
+RETRY_DELAY = 2 
 
 
 
@@ -197,33 +204,116 @@ def get_content_with_selenium(url):
             break
 
     return c.encode('utf-8')
+
 def get_download_link(div):
-
+    """Finds and returns the download link for a paper if available."""
     try:
-        download_link = div.find("div", {"class": "gs_ggs gs_fl"}).find("a").get("href")
+        download_div = div.find("div", {"class": "gs_ggs gs_fl"})
+        if not download_div:
+            return None
 
-        if "pdf" in download_link.lower():
-            return download_link
-    except Exception:
-        pass
+        link = download_div.find("a").get("href")
+        if link and "pdf" in link.lower():
+            return link
+
+        # Handle external HTML links
+        if "HTML" in download_div.text:
+            print(f"Processing external HTML link: {link}")
+            pdf_link = handle_external_link(link)
+            if pdf_link:
+                print(f"Found PDF link in external HTML: {pdf_link}")
+                return pdf_link
+            else:
+                print("Pdf link not found at", link, "search manually")
+
+    except Exception as e:
+        print(f"Error extracting download link: {e}")
+
     return None
 
 
-def download_pdf(url, path):
-    try:
-        response = requests.get(url, stream=True)
-        if response.headers.get("content-type") == "application/pdf":
-            with open(path, "wb") as file:
-                for chunk in response.iter_content(chunk_size=1024):
-                    file.write(chunk)
-            print(f"Downloaded: {path}")
-            return True
-        else:
-            print(f"Skipping non-PDF content: {url}")
-            return False
-    except Exception as e:
-        print(f"Failed to download PDF from {url}. Error: {e}")
-        return False
+     
+ 
+    
+
+async def download_pdf_async(session, url, path):
+    """Downloads the PDF asynchronously from a URL to the specified path, with retries."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.headers.get("content-type") == "application/pdf" or url.endswith(".pdf"):
+                    async with aio_open(path, "wb") as file:
+                        async for chunk in response.content.iter_chunked(1024):
+                            if chunk:
+                                await file.write(chunk)
+                    print(f"Downloaded PDF: {path}")
+                    return True
+                else:
+                    # Attempt to detect PDFs from content if Content-Type is misleading
+                    first_chunk = await response.content.read(1024)
+                    if b"%PDF" in first_chunk:  # PDF files usually start with %PDF
+                        async with aio_open(path, "wb") as file:
+                            await file.write(first_chunk)
+                            async for chunk in response.content.iter_chunked(1024):
+                                await file.write(chunk)
+                        print(f"Downloaded PDF (detected from content): {path}")
+                        return True
+                    else:
+                        print(f"Skipping non-PDF content: {url}")
+                        return False
+        except aiohttp.ClientError as e:
+            print(f"Network error during attempt {attempt + 1} for {url}: {e}")
+        except asyncio.TimeoutError:
+            print(f"Timeout during attempt {attempt + 1} for {url}.")
+        except Exception as e:
+            print(f"Unexpected error during attempt {attempt + 1} for {url}: {e}")
+
+        if attempt < MAX_RETRIES - 1:
+            print(f"Retrying in {RETRY_DELAY} seconds...")
+            await asyncio.sleep(RETRY_DELAY)
+
+    print(f"Failed to download PDF from {url} after {MAX_RETRIES} attempts.")
+    return False
+
+
+# Function to handle all PDF downloads asynchronously
+async def download_pdfs(papers):
+    """Handles downloading PDFs for all papers asynchronously."""
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for paper in papers:
+            if paper['download_link']:
+                pdf_save_path = os.path.join(paper['pdf_save_dir'], f"{paper['paper_id']}.pdf")
+                tasks.append(download_pdf_async(session, paper['download_link'], pdf_save_path))
+            else:
+                print(f"No download link available for {paper['title']}.")
+
+        # Run all tasks concurrently
+        results = await asyncio.gather(*tasks)
+        return results
+
+
+
+
+def handle_external_link(link):
+    """
+    Handle an external link to find the PDF link within the page.
+    """
+    outer_page = requests.get(link).content
+    soup = BeautifulSoup(outer_page, "html.parser")
+    a_tags = soup.findAll("a")
+
+    for a_tag in a_tags:
+        href = a_tag.get("href")
+
+        resolved_link = urljoin(link, href)  # Resolve relative link
+
+        if "pdf" in resolved_link.lower():
+            return resolved_link
+
+    return None
+
+
 
 def format_strings(strings):
     if len(strings) == 1:
@@ -236,20 +326,9 @@ def main():
     # Get command line arguments
     keyword, number_of_results, save_database, path, sortby_column, langfilter, plot_results, start_year, end_year, debug = get_command_line_args()
 
-    print("Running with the following parameters:")
+    # print("Running with the following parameters:")
     print(
         f"Keyword: {keyword}, Number of results: {number_of_results}, Save database: {save_database}, Path: {path}, Sort by: {sortby_column}, Permitted Languages: {langfilter}, Plot results: {plot_results}, Start year: {start_year}, End year: {end_year}, Debug: {debug}")
-
-    temp_csv = "temp_results.csv"  # Temporary file for saving progress
-    processed_ranks = []  # Track already processed ranks
-
-    # Check for resumption
-    if os.path.exists(temp_csv):
-        print(f"Found temporary file: {temp_csv}. Resuming from saved progress.")
-        data = pd.read_csv(temp_csv, index_col="Rank")
-        processed_ranks = data.index.tolist()
-    else:
-        data = pd.DataFrame(columns=['ID', 'Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source', 'Download Link', 'Download Status'])
 
     # Create main URL based on command line arguments
     if start_year:
@@ -275,8 +354,35 @@ def main():
     rank = [0]  # Start rank at 0
     pdf_save_dir = os.path.join(path, "PDFs")  # Directory for saving PDFs
     os.makedirs(pdf_save_dir, exist_ok=True)
+    df = pd.DataFrame()
+    # Check for temporary progress file
+    temp_csv = os.path.join(path, "temp_results.csv")
+    temp_cols = 0
+    if os.path.exists(temp_csv):
+        print(f"Found temporary file: {temp_csv}. Resuming from saved progress.")
+        try:
+            df = pd.read_csv(temp_csv)
 
-    # Generates unique IDs for naming the downloaded pdfs
+            # Verify and fix the Rank column if missing or invalid
+            if 'Rank' not in df.columns or df['Rank'].isnull().all():
+                print("Rank column missing or invalid. Regenerating index...")
+                df.index = range(1, len(df) + 1)
+                df.index.name = 'Rank'
+            else:
+                df.set_index('Rank', inplace=True)
+            temp_cols = len(df)
+            print(f"Resuming from paper {len(df) + 1}.")
+            rank_start = len(df)  # Start from the next unprocessed paper
+        except Exception as e:
+            print(f"Error reading temporary file: {e}. Starting from scratch.")
+            rank_start = 0
+            data = pd.DataFrame()
+    else:
+        # print("No temporary file found. Starting from scratch.")
+        rank_start = 0
+        data = pd.DataFrame()
+
+    # Generate unique IDs
     def generate_unique_id(idx):
         return f"paper_{idx:04d}"
 
@@ -284,24 +390,20 @@ def main():
 
 
     # Get content from number_of_results URLs
-    for n in range(0, number_of_results, 10):
-        if n in processed_ranks:
-            print(f"Skipping results already processed in temp csv file.")
-            continue
-
+    for n in range(rank_start, number_of_results, 10):
         url = GSCHOLAR_MAIN_URL.format(str(n), keyword.replace(' ', '+'))
         if debug:
             print("Opening URL:", url)
 
-        print(f"Loading next {n + 10} results")
+        # print(f"Loading next {n + 10} results")
         page = session.get(url)
         c = page.content
         if any(kw in c.decode('ISO-8859-1') for kw in ROBOT_KW):
-            print("Robot checking detected, handling with selenium (if installed)")
+            # print("Robot checking detected, handling with selenium (if installed)")
             try:
                 c = get_content_with_selenium(url)
             except Exception as e:
-                print("No success. The following error was raised:")
+                # print("No success. The following error was raised:")
                 print(e)
 
         # Create parser
@@ -309,8 +411,9 @@ def main():
 
         # Get stuff
         mydivs = soup.findAll("div", {"class": "gs_or"})
+        papers= []
         for div in mydivs:
-            paper_id = generate_unique_id(len(rank))
+            paper_id = generate_unique_id(len(rank)+temp_cols)
             paper_ids.append(paper_id)
 
             try:
@@ -354,29 +457,47 @@ def main():
             download_link = get_download_link(div)
             download_links.append(download_link)
 
-            # Download PDF if download link is available
-            if download_link:
-                pdf_save_path = os.path.join(pdf_save_dir, f"{paper_id}.pdf")
-                success = download_pdf(download_link, pdf_save_path)
-                download_status.append("Success" if success else "Failed")
-            else:
-                download_status.append("No Link")
 
+            if not download_link:
+                download_status.append("No Link")
             rank.append(rank[-1] + 1)
 
-        # Save progress to temporary file
-        temp_data = pd.DataFrame(list(zip(paper_ids, author, title, citations, year, publisher, venue, links, download_links, download_status)),
-                                 index=rank[1:],
-                                 columns=['ID', 'Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source', 'Download Link', 'Download Status'])
-        temp_data.index.name = 'Rank'
-        data = pd.concat([data, temp_data])
-        data.to_csv(temp_csv, encoding='utf-8')
-        print(f"Progress saved to {temp_csv}")
 
+        for idx, (paper_id, title, download_link) in enumerate(zip(paper_ids, title, download_links)):
+            pdf_save_path = os.path.join(pdf_save_dir, f"{paper_id}.pdf")
+            papers.append({
+                "paper_id": paper_id,
+                "title": title,
+                "download_link": download_link,
+                "pdf_save_dir": pdf_save_dir,
+                "pdf_save_path": pdf_save_path,
+            })
+        print("Starting asynchronous PDF downloads...")
+        results = asyncio.run(download_pdfs(papers))
+        download_status+= results
+        
+            
+        
+        # Save progress to a temporary file
+        temp_data = pd.DataFrame(list(zip(paper_ids, author, title, citations, year, publisher, venue, links, download_links, download_status)),
+                                 columns=['ID', 'Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source', 'Download Link', 'Download Status'])
+        temp_data['Rank'] = range(1, len(temp_data) + 1)
+        temp_data.to_csv(temp_csv, index=False)
+        print("Progress saved to temp_results.csv")
+        title = list(title)
         # Delay
         sleep(random.uniform(0.5, 3))
 
     # Create a dataset and sort by the number of citations
+    data = pd.DataFrame(list(zip(paper_ids, author, title, citations, year, publisher, venue, links, download_links)),
+                        index=rank[1:],
+                        columns=['ID', 'Author', 'Title', 'Citations', 'Year', 'Publisher', 'Venue', 'Source', 'Download Link'])
+    if not df.empty:
+        frames = [df, data]
+        data = pd.concat(frames)
+    data.index.name = 'Rank'
+
+    # Avoid years that are higher than the current year by clipping it to end_year
     data['cit/year'] = data['Citations'] / (end_year + 1 - data['Year'].clip(upper=end_year))
     data['cit/year'] = data['cit/year'].round(0).astype(int)
 
@@ -404,12 +525,12 @@ def main():
         fpath_csv = os.path.join(path, keyword.replace(' ', '_').replace(':', '_') + '.csv')
         fpath_csv = fpath_csv[:MAX_CSV_FNAME]
         data_ranked.to_csv(fpath_csv, encoding='utf-8')
-        print('Results saved to', fpath_csv)
+        # print('Results saved to', fpath_csv)
 
     #delete the temporary file
     if os.path.exists(temp_csv):
         os.remove(temp_csv)
-       
+
 
 
 
